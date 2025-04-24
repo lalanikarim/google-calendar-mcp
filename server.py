@@ -7,7 +7,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta, timezone
-from src import Event, EventDateTime, EventDateOnly, EventAttendee, FreeBusyRequest, FreeBusyCalendar, FreeBusyResponse
+from src import (Event, EventDateTime, EventDateOnly, EventAttendee,
+                 FreeBusyRequest, FreeBusyCalendar, FreeBusyResponse)
 from typing import Optional, List, TypedDict, Any
 import pytz
 
@@ -24,7 +25,6 @@ TZ = os.getenv("TZ", "-05:00")
 SLOT_MINIUTES = os.getenv("SLOT_MINUTES", 30)
 # If modifying these scopes, delete the file token.json.
 SCOPES = [
-    # "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.freebusy",
@@ -71,7 +71,7 @@ class Response(TypedDict):
 
 
 class Error(TypedDict):
-    error: str
+    error: Any
 
 
 def query_calendar(date: EventDateOnly) -> Response | Error:
@@ -106,25 +106,23 @@ def book_appointment(
     description: Optional[str],
     location: Optional[str],
     start: EventDateTime,
-    emails: List[str],
+    attendees: List[str],
 ) -> Response | Error:
     """
     Book an appointment on the calendar
     """
     try:
         service = get_service()
-        dt_start = datetime.strptime(
-            start.dateTime, "%Y-%m-%dT%H:%M:%S")
+        dt_start = datetime.fromisoformat(start.dateTime)
         dt_end = dt_start + timedelta(minutes=int(SLOT_MINIUTES))
-        end = EventDateTime(dateTime=dt_end.strftime(
-            "%Y-%m-%dT%H:%M:%S"), timeZone=TIMEZONE)
+        end = EventDateTime(dateTime=dt_end.isoformat(), timeZone=TIMEZONE)
         body = Event(
             summary=summary,
             location=location,
             start=start,
             end=end,
             attendees=[EventAttendee(email=attendee)
-                       for attendee in set(emails + [EMAIL])])
+                       for attendee in set(attendees + [EMAIL])])
         if not body.start.timeZone:
             body.start.timeZone = TIMEZONE
         if not body.end.timeZone:
@@ -171,7 +169,7 @@ if __name__ == "__main__":
                                     description="New Event Description", location=None,
                                     start=EventDateTime(
                                         dateTime="2025-04-24T13:00:00", timeZone="America/Chicago"),
-                                    emails=["jimmy00784@gmail.com"]
+                                    attendees=["jimmy00784@gmail.com"]
                                     )
         print(f"{response=}")
     response = get_next_n_events()

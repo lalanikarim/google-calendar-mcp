@@ -1,4 +1,3 @@
-import datetime
 import os.path
 
 from google.auth.transport.requests import Request
@@ -6,56 +5,43 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from pydantic import BaseModel, Field
-from typing import List, Dict, TypedDict, Any, Optional
 from mcp.server.fastmcp import FastMCP
+from datetime import datetime, timedelta, timezone
+from src import Event, EventDateTime, EventDateOnly, EventAttendee
+from typing import Optional, List, TypedDict, Any
+import pytz
 
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
-
+CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")
+EMAIL = os.getenv("EMAIL")
+TIMEZONE = os.getenv("TIMEZONE", "America/Chicago")
+OPEN_FROM = os.getenv("OPEN_FROM", "10:00:00")
+OPEN_TILL = os.getenv("OPEN_TILL", "18:00:00")
+TZ = os.getenv("TZ", "-05:00")
+SLOT_MINIUTES = os.getenv("SLOT_MINUTES", 30)
 # If modifying these scopes, delete the file token.json.
 SCOPES = [
+    # "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.freebusy",
 ]
 
 
-class EventTime(BaseModel):
-    dateTime: str = Field(
-        ..., description="Date and optional time of the event in format `YYYY-DD-MMTHH:mm:ss-TZ`")
-    timeZone: str = Field(
-        ..., description="Timzeone of the event date time. Default: 'America/Chicago'")
-
-
-class EventAttendee(BaseModel):
-    email: str = Field(..., description="Email address of the attendee")
-
-
-class Event(BaseModel):
-    summary: str = Field(..., description="Summary of the event")
-    location: Optional[str] = Field(
-        None, description="Location of the meeting. Either an address or an online meeting link")
-    start: EventTime = Field(...,
-                             description="Start date and time of the event")
-    end: EventTime = Field(..., description="End date and time of the event")
-    attendees: List[EventAttendee] = Field([],
-                                           description="List of attendees")
-
-
 mcp = FastMCP("Calendar")
 
 
-def main():
+def authenticate():
     """Shows basic usage of the Google Calendar API.
     Prints the start and name of the next 10 events on the user's calendar.
     """
-    creds = None
     # The file token.json stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first
     # time.
+    creds = None
     if os.path.exists("token.json"):
         creds = Credentials.from_authorized_user_file("token.json", SCOPES)
     # If there are no (valid) credentials available, let the user log in.
@@ -64,25 +50,106 @@ def main():
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", SCOPES
-            )
+                "credentials.json", SCOPES)
             creds = flow.run_local_server(port=0)
         # Save the credentials for the next run
         with open("token.json", "w") as token:
             token.write(creds.to_json())
+    if creds:
+        return creds
+    raise Exception("Unable to authenticate")
 
+
+def get_service():
+    creds = authenticate()
+    service = build("calendar", "v3", credentials=creds)
+    return service
+
+
+class Response(TypedDict):
+    response: Any
+
+
+class Error(TypedDict):
+    error: str
+
+
+def query_calendar(date: EventDateOnly) -> Response | Error:
     try:
-        service = build("calendar", "v3", credentials=creds)
+        service = get_service()
+        now = datetime.now(pytz.timezone(TIMEZONE)).isoformat()
+        start = datetime.fromisoformat(
+            f"{date.date}T{OPEN_FROM}{TZ}").isoformat()
+        end = datetime.fromisoformat(
+            f"{date.date}T{OPEN_TILL}{TZ}").isoformat()
+        print(f"{now=},{start=},{end=}")
+        query = {
+            "timeMin": start if start >= now else now,
+            "timeMax": end,
+            "timeZone": TIMEZONE,
+            "items": [
+                {"id": CALENDAR_ID, }
+            ]
+        }
+        print(f"{query=}")
+        result = service.freebusy().query(body=query).execute()
+        return Response(response=result)
+    except HttpError as error:
+        print(f"An error occurred: {error}, {error._get_reason()=}")
+        return Error(error=error)
 
+
+@mcp.tool()
+def book_appointment(
+    summary: str,
+    description: Optional[str],
+    location: Optional[str],
+    start: EventDateTime,
+    emails: List[str],
+) -> Response | Error:
+    """
+    Book an appointment on the calendar
+    """
+    try:
+        service = get_service()
+        dt_start = datetime.strptime(
+            start.dateTime, "%Y-%m-%dT%H:%M:%S")
+        dt_end = dt_start + timedelta(minutes=int(SLOT_MINIUTES))
+        end = EventDateTime(dateTime=dt_end.strftime(
+            "%Y-%m-%dT%H:%M:%S"), timeZone=TIMEZONE)
+        body = Event(
+            summary=summary,
+            location=location,
+            start=start,
+            end=end,
+            attendees=[EventAttendee(email=attendee)
+                       for attendee in set(emails + [EMAIL])])
+        if not body.start.timeZone:
+            body.start.timeZone = TIMEZONE
+        if not body.end.timeZone:
+            body.end.timeZone = TIMEZONE
+        print(f"{body.model_dump(exclude_none=True)=}")
+        event = service.events().insert(calendarId=CALENDAR_ID,
+                                        body=body.model_dump(exclude_none=True)).execute()
+        event = Event(**event)
+        return Response(response=event.htmlLink)
+    except HttpError as error:
+        print(f"An error occurred: {error}, {error._get_reason()=}")
+        return Error(error=error)
+
+
+def get_next_n_events(max: int = 10) -> Response | Error:
+    try:
+        service = get_service()
         # Call the Calendar API
-        now = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+        now = datetime.now(tz=timezone.utc).isoformat()
         print("Getting the upcoming 10 events")
         events_result = (
             service.events()
             .list(
-                calendarId=os.getenv("CALENDAR_ID", "primary"),
+                calendarId=CALENDAR_ID,
                 timeMin=now,
-                maxResults=10,
+                maxResults=max,
                 singleEvents=True,
                 orderBy="startTime",
             )
@@ -90,19 +157,23 @@ def main():
         )
         events = events_result.get("items", [])
 
-        if not events:
-            print("No upcoming events found.")
-            return
-
-        # Prints the start and name of the next 10 events
-        for event in events:
-            # event["start"].get("dateTime", event["start"].get("date"))
-            event = Event(**event)
-            print(event.start, event.summary)
+        return Response(response=[Event(**event) for event in events])
 
     except HttpError as error:
         print(f"An error occurred: {error}")
+        return Error(error=error)
 
 
 if __name__ == "__main__":
-    main()
+    if False:
+        response = book_appointment(summary="New Event Summary",
+                                    description="New Event Description", location=None,
+                                    start=EventDateTime(
+                                        dateTime="2025-04-24T13:00:00", timeZone="America/Chicago"),
+                                    emails=["jimmy00784@gmail.com"]
+                                    )
+        print(f"{response=}")
+    response = get_next_n_events()
+    print(f"{response=}")
+    response = query_calendar(date=EventDateOnly(date="2025-04-24"))
+    print(f"{response=}")

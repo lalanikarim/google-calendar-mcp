@@ -7,7 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta, timezone
-from src import Event, EventDateTime, EventDateOnly, EventAttendee
+from src import Event, EventDateTime, EventDateOnly, EventAttendee, FreeBusyRequest, FreeBusyCalendar, FreeBusyResponse
 from typing import Optional, List, TypedDict, Any
 import pytz
 
@@ -83,16 +83,17 @@ def query_calendar(date: EventDateOnly) -> Response | Error:
         end = datetime.fromisoformat(
             f"{date.date}T{OPEN_TILL}{TZ}").isoformat()
         print(f"{now=},{start=},{end=}")
-        query = {
-            "timeMin": start if start >= now else now,
-            "timeMax": end,
-            "timeZone": TIMEZONE,
-            "items": [
-                {"id": CALENDAR_ID, }
+        query = FreeBusyRequest(
+            timeMin=start if start >= now else now,
+            timeMax=end,
+            timeZone=TIMEZONE,
+            items=[
+                FreeBusyCalendar(id=CALENDAR_ID)
             ]
-        }
+        )
         print(f"{query=}")
-        result = service.freebusy().query(body=query).execute()
+        result = service.freebusy().query(body=query.model_dump()).execute()
+        result = FreeBusyResponse(**result)
         return Response(response=result)
     except HttpError as error:
         print(f"An error occurred: {error}, {error._get_reason()=}")

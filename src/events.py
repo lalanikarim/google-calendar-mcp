@@ -24,6 +24,7 @@ class EventAttendee(BaseModel):
 class Event(BaseModel):
     id: Optional[str] = Field(None, description="Event Id")
     summary: str = Field(..., description="Summary of the event")
+    description: Optional[str] = Field(..., description="Description of the event")
     location: Optional[str] = Field(
         None,
         description="Location of the meeting. Either an address or an online meeting link",

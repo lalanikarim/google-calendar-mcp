@@ -22,7 +22,7 @@ TIMEZONE = os.getenv("TIMEZONE", "America/Chicago")
 OPEN_FROM = os.getenv("OPEN_FROM", "10:00:00")
 OPEN_TILL = os.getenv("OPEN_TILL", "18:00:00")
 TZ = os.getenv("TZ", "-05:00")
-SLOT_MINIUTES = os.getenv("SLOT_MINUTES", 30)
+SLOT_MINUTES = os.getenv("SLOT_MINUTES", 30)
 # If modifying these scopes, delete the file token.json.
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
@@ -74,14 +74,23 @@ class Error(TypedDict):
     error: Any
 
 
-def query_calendar(date: EventDateOnly) -> Response | Error:
+@mcp.tool()
+def get_calendar_busy_slots(when: EventDateOnly | str) -> Response | Error:
+    """
+    Check the calendar for busy slots for a given date
+
+    args:
+        when: Date to check for busy slots in ISO format
+    """
     try:
         service = get_service()
         now = datetime.now(pytz.timezone(TIMEZONE)).isoformat()
+        if isinstance(when, str):
+            when = EventDateOnly(date=when)
         start = datetime.fromisoformat(
-            f"{date.date}T{OPEN_FROM}{TZ}").isoformat()
+            f"{when.date}T{OPEN_FROM}{TZ}").isoformat()
         end = datetime.fromisoformat(
-            f"{date.date}T{OPEN_TILL}{TZ}").isoformat()
+            f"{when.date}T{OPEN_TILL}{TZ}").isoformat()
         print(f"{now=},{start=},{end=}")
         query = FreeBusyRequest(
             timeMin=start if start >= now else now,
@@ -96,7 +105,7 @@ def query_calendar(date: EventDateOnly) -> Response | Error:
         result = FreeBusyResponse(**result)
         return Response(response=result)
     except HttpError as error:
-        print(f"An error occurred: {error}, {error._get_reason()=}")
+        print(f"An error occurred: {error}, {error.reason=}")
         return Error(error=error)
 
 
@@ -110,14 +119,26 @@ def book_appointment(
 ) -> Response | Error:
     """
     Book an appointment on the calendar
+
+    args:
+        summary: Summary of the appointment
+        description: Optional - Description of the appointment
+        location: Optional - Location of the appointment
+        start: Start of the appointment in ISO format
+        attendees: List of attendee email addresses
     """
     try:
         service = get_service()
         dt_start = datetime.fromisoformat(start.dateTime)
-        dt_end = dt_start + timedelta(minutes=int(SLOT_MINIUTES))
+        if dt_start.time() < datetime.strptime(OPEN_FROM,"%H:%M:%S").time():
+            return Error(error=f"Cannot book an appointment before {OPEN_FROM}")
+        dt_end = dt_start + timedelta(minutes=int(SLOT_MINUTES))
+        if dt_end.time() > datetime.strptime(OPEN_TILL,"%H:%M:%S").time():
+            return Error(error=f"Cannot book an appointment after {OPEN_TILL}")
         end = EventDateTime(dateTime=dt_end.isoformat(), timeZone=TIMEZONE)
         body = Event(
             summary=summary,
+            description=description,
             location=location,
             start=start,
             end=end,
@@ -133,22 +154,35 @@ def book_appointment(
         event = Event(**event)
         return Response(response=event.htmlLink)
     except HttpError as error:
-        print(f"An error occurred: {error}, {error._get_reason()=}")
+        print(f"An error occurred: {error}, {error.reason=}")
         return Error(error=error)
 
 
-def get_next_n_events(max: int = 10) -> Response | Error:
+@mcp.tool()
+def get_upcoming_events(starting_from: Optional[EventDateTime] = None, max_events: int = 10) -> Response | Error:
+    """
+    Get upcoming events from the calendar
+
+    args:
+        starting_from: Optional - Date and time to check for busy slots in ISO format - defaults to current time
+        max_events: Optional - Maximum number of events to return - defaults to 10
+    """
     try:
         service = get_service()
         # Call the Calendar API
         now = datetime.now(tz=timezone.utc).isoformat()
+        if starting_from:
+            starting_from.dateTime = datetime.fromisoformat(starting_from.dateTime).isoformat()
+            if len(starting_from.dateTime) == 19:
+                starting_from.dateTime = starting_from.dateTime + TZ
+            print(f"{starting_from.dateTime=},{len(starting_from.dateTime)=}")
         print("Getting the upcoming 10 events")
         events_result = (
             service.events()
             .list(
                 calendarId=CALENDAR_ID,
-                timeMin=now,
-                maxResults=max,
+                timeMin=starting_from.dateTime if starting_from else now,
+                maxResults=max_events,
                 singleEvents=True,
                 orderBy="startTime",
             )
@@ -164,15 +198,6 @@ def get_next_n_events(max: int = 10) -> Response | Error:
 
 
 if __name__ == "__main__":
-    if False:
-        response = book_appointment(summary="New Event Summary",
-                                    description="New Event Description", location=None,
-                                    start=EventDateTime(
-                                        dateTime="2025-04-24T13:00:00", timeZone="America/Chicago"),
-                                    attendees=["jimmy00784@gmail.com"]
-                                    )
-        print(f"{response=}")
-    response = get_next_n_events()
-    print(f"{response=}")
-    response = query_calendar(date=EventDateOnly(date="2025-04-24"))
-    print(f"{response=}")
+    import uvicorn
+    if get_service():
+        uvicorn.run(mcp.sse_app())
